@@ -1,0 +1,176 @@
+# coding: utf-8
+# This Python file uses the following encoding: utf-8
+
+
+__author__ = "SiyuYao"
+
+
+import pymysql.cursors
+from datasketch import MinHash, MinHashLSH, MinHashLSHForest
+
+import redis
+import time
+import json
+
+
+
+# 创建全局变量lsh, content, minhashCode
+lsh = MinHashLSH(threshold=0.7, num_perm=256)
+content = []
+minhashCode = []
+data = []
+j = 0 # 代表lsh行数 
+
+# 连接redis
+r = redis.Redis(host='ip', port=1234)
+
+
+
+# 发号器
+def getAGid():
+    ISOTIMEFORMAT ='%Y%m%d'
+    today = time.strftime(ISOTIMEFORMAT, time.localtime())
+    pulseGid = r.get('pulseGid')
+    pulseDay = r.get('pulseDay')
+
+    if pulseGid:
+        pass
+    else:
+        pulseGid = 0
+
+    if pulseDay:
+        if pulseDay != today:
+            pulseGid = 0
+            pulseDay = today
+    else:
+        pulseDay = today
+
+    pulseGid = str(int(pulseGid)+1)
+
+    r.set('pulseGid', pulseGid)
+    r.set('pulseDay',pulseDay)
+
+    while(pulseGid.__len__()<6):
+        pulseGid = "0"+pulseGid
+    pulseGid = "g"+pulseDay + pulseGid
+    return pulseGid
+
+
+#对lsh进行初始化
+def loadDataForLSH():
+    print "loadDataForLSH"
+    global data
+    global lsh
+    global content
+    global minhashCode
+    global j
+    # Connect to the database
+    connection = pymysql.connect(host='ip',
+                                 port=0,
+                                 user='',
+                                 password='',
+                                 db='',
+                                 charset='',
+                                 cursorclass=pymysql.cursors.DictCursor)
+
+
+    # 执行sql语句
+    try:
+        with connection.cursor() as cursor:
+            # 执行sql语句，获取记录
+            sql = "select content from table"
+            cursor.execute(sql)
+            data = cursor.fetchall()
+            if len(data) == 0:
+                data = []
+            cursor.close()  
+            connection.commit()
+            connection.close() 
+    except Exception, e:
+        print(e)
+
+    for i in range(0, len(data)):
+        content.append(data[i]['content'])
+    for line in content:
+        hashCode = MinHash(num_perm=256)
+        minhashCode.append(hashCode)
+        try:
+            for d in line:
+                minhashCode[j].update(d.encode('utf-8'))
+            lsh.insert(j, minhashCode[j])
+            j += 1
+        except Exception, e:
+            print e
+    print "loadDataForLSH finish"
+
+
+# 函数的输入为一条数据,函数的返回为数据的gid
+def findGroupForOneData(singleDataString):
+    global data
+    global lsh
+    global content
+    global minhashCode
+    global j
+    gid = -1
+    mfind = MinHash(num_perm=256)
+
+    for df in singleDataString:
+        mfind.update(df.encode('utf-8'))
+
+    for retry in range(0, 3):
+        try:
+            lsh.insert(j, mfind)
+            break
+        except Exception as e:
+            j += 1
+            continue
+    resultLSH = lsh.query(mfind)
+
+    # 从resultLSH中去除第j个 因为第j个是最新加的一个
+    mark = -1
+    for i in range(0, len(resultLSH)):
+        if resultLSH[i] == j:
+            mark = i
+    if mark != -1:
+        resultLSH.pop(mark)
+
+    try:
+        # 如果resultLSH不为空 那么说明数据集中有和这条数据相似的
+        if len(resultLSH):
+            # 构造一个list 元素是dict
+            lst = []
+            for resultItem in resultLSH:
+                lstItem = {}
+                lstItem['jaccard'] = mfind.jaccard(minhashCode[resultItem])
+                lstItem['gid'] = data[resultItem]['gid']
+                lstItem['index'] = resultItem
+                lst.append(lstItem)
+            # lst 根据jaccard排序 jaccard
+            lst.sort(key=lambda k: (k.get('jaccard', 0)), reverse=True)
+
+            for lstItemTemp in lst:
+                if str(lstItemTemp['gid']).isdigit() == False:
+                    gid = lstItemTemp['gid']
+                    break
+            if gid == -1:
+            # 说明这些数据都没有gid 统一给它们一个gid
+                gid = getAGid()
+                for lstItemTemp in lst:
+                     data[lstItemTemp['index']]['gid'] = gid
+        else:
+          # 如果resultLSH为空 那么说明数据集中没有和这条数据相似的 赋予它一个新的gid
+            gid = getAGid()
+        singleData['gid'] = gid
+        # 将最新一条数据加到lsh content data里
+        content.append(singleData['content'])
+        data.append(singleData)
+        minhashCode.append(mfind)
+        j += 1
+    except Exception as e:
+        singleData['gid'] = gid
+        # 将最新一条数据加到lsh content data里
+        content.append(singleData['content'])
+        data.append(singleData)
+        minhashCode.append(mfind)
+        j += 1
+    return gid
